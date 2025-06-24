@@ -1,0 +1,75 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+  // output   = ""
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+
+model User {
+  id String @id
+  email String @unique
+  name String?
+  image String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Projects {
+  id String @id @default(uuid())
+  userId String 
+  projectName String
+  chatbotName String
+  websiteUrl String @unique
+  projectDescription String?
+  welcomeMessage String?
+  avatarImage String?
+  chatBotType String?  // id will be store here =>  1: Documentation Chatbot, 2: Lead Generator, 3: General Assistant
+  supportEmail String?
+  supportContact String?
+  isPaused Boolean @default(false)
+  status String? // active, paused, scraping
+  retryCount Int @default(0)
+  scrappedStatus ScrappedStatus[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([websiteUrl])
+  @@index([chatBotType])
+}
+
+model ScrappedStatus {
+  id String @id @default(uuid())
+  projects Projects @relation(fields: [projectId], references: [id])
+  projectId String
+  success String // success, working, failed
+  scrappedLinks ScrappedLinks[]
+  pages Int
+  errors Int
+  total_words Int
+  current Boolean // currently used data or not  
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model ScrappedLinks {
+  id String @id @default(uuid())
+  urls String
+  status Boolean // true => success & false => failed
+  ScrappedStatus ScrappedStatus @relation(fields: [scrappedId], references: [id])
+  scrappedId String
+
+  @@index([scrappedId])
+}
