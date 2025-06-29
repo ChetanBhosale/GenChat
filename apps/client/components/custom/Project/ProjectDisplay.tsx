@@ -3,12 +3,13 @@ import { ProjectContext } from '@/context/ProjectContext'
 import { IprojectSchema } from '@repo/common/type'
 import React, { Fragment, useContext } from 'react'
 import CreateNewProjectScreen from './CreateNewProjectScreen'
-import { Bot, ExternalLink, MoreVertical, Activity, Calendar, Eye, Settings, TrendingUp, Loader2 } from 'lucide-react'
+import { Bot, ExternalLink, Activity, Calendar, Forward } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { project_type_color, ProvideChatBotById } from '@repo/common'
 import Link from 'next/link'
 import ProjectSkeleton from './ProjectSkeleton'
+import { useRouter } from 'next/navigation'
 // import { statusConfig } from '@/config/project-status'
 
 type Props = {}
@@ -17,6 +18,7 @@ const ProjectDisplay = (props: Props) => {
   const ctx = useContext(ProjectContext)
   if (!ctx) throw new Error("ProjectContext must be used inside ProjectProvider")
   const { filterProjects } = ctx;
+  const router = useRouter()
 
   return (
     <Fragment>
@@ -24,7 +26,7 @@ const ProjectDisplay = (props: Props) => {
         filterProjects == null ? Array.from({length: 6}).map((_,index) => <ProjectSkeleton key={index} />) : filterProjects?.length == 0 ? <CreateNewProjectScreen /> : <>
         {
             filterProjects?.map((project: IprojectSchema, index) => (
-              <div key={index} className='bg-card rounded-xl border border-border p-6 hover:shadow-lg transition-all duration-200'>
+              <div key={index} className='bg-card h-full rounded-xl border border-border p-6 hover:shadow-lg transition-all duration-200'>
                 <div className='flex items-start justify-between mb-4'>
                   <div className='flex items-center gap-3'>
                     <div className='w-12 h-12 bg-primary/20 rounded-lg flex items-center justify-center'>
@@ -32,12 +34,13 @@ const ProjectDisplay = (props: Props) => {
                     </div>
                     <div>
                       <h3 className='text-lg font-semibold text-card-foreground'>{project.projectName}</h3>
-                      <p className='text-sm text-muted-foreground'>{project.projectDescription}</p>
+                      <p className='text-sm text-muted-foreground'>{project.projectDescription.slice(0, 20)}...</p>
                     </div>
                   </div>
                   <div className='relative'>
-                    <Button variant="ghost" size="sm">
-                      <MoreVertical className='w-4 h-4' />
+                    <Button variant="ghost" size="sm" onClick={() => router.push(`/dashboard/projects/${project.projectName}`)}>
+                      <Forward className='w-4 h-4' />
+                      View
                     </Button>
                   </div>
                 </div>
@@ -83,21 +86,6 @@ const ProjectDisplay = (props: Props) => {
                     Created: {new Date(project.createdAt).toLocaleDateString()}
                   </span>
                 </div> 
-
-                <div className='flex gap-2 pt-4 border-t border-border'>
-                  <Button variant="outline" size="sm" className='flex-1'>
-                    <Eye className='w-4 h-4 mr-2' />
-                    View
-                  </Button>
-                  <Button variant="outline" size="sm" className='flex-1'>
-                    <Settings className='w-4 h-4 mr-2' />
-                    Settings
-                  </Button>
-                  <Button variant="outline" size="sm" className='flex-1'>
-                    <TrendingUp className='w-4 h-4 mr-2' />
-                    Analytics
-                  </Button>
-                </div>
               </div>
             ))
           }

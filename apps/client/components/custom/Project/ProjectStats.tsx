@@ -95,7 +95,7 @@ const projects = [
 
 const ProjectStats = () => {
   return (
-          <div className='grid grid-cols-1 md:grid-cols-4 gap-4'>
+          <div className='grid grid-cols-1 md:grid-cols-3 gap-4'>
         <div className='bg-card rounded-lg border border-border p-4'>
           <div className='flex items-center gap-3'>
             <Bot className='w-5 h-5 text-blue-400' />
@@ -123,15 +123,7 @@ const ProjectStats = () => {
             </div>
           </div>
         </div>
-        <div className='bg-card rounded-lg border border-border p-4'>
-          <div className='flex items-center gap-3'>
-            <Users className='w-5 h-5 text-orange-400' />
-            <div>
-              <p className='text-2xl font-bold text-card-foreground'>{totalUsers.toLocaleString()}</p>
-              <p className='text-sm text-muted-foreground'>Total Users</p>
-            </div>
-          </div>
-        </div>
+
       </div>
   )
 }

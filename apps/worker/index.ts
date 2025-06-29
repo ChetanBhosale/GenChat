@@ -190,9 +190,13 @@ async function processVectorChunksWithPinecodeModels(projectId: string, chunks: 
   console.log({chunks})
   try {
     console.log(`Processing ${chunks.length} vector chunks with Pinecone models for project ${projectId}`);
+
     
     let indexName = process.env.NODE_ENV === 'PRODUCTION' ? ai_config.prod_index : ai_config.dev_index;
     let index = AIModel.pc.index(indexName).namespace(projectId);
+    //  delete last all records for same namespace
+
+    await index.deleteAll();
     
     // Get index statistics before processing
     let stats = await index.describeIndexStats();
@@ -273,6 +277,8 @@ async function startScrapping(scrapedData: IScrapingSchema, webUrl: string): Pro
 console.log('Worker started - Listening for scraping jobs...');
 
 while (true) {
+  await new Promise(resolve => setTimeout(resolve, 4000));
+  // 4000ms = 4 seconds
   try {
     const data = await redis.lpop(system_config.scrape_queue);
     // const data = "3613425f-cd6f-47fa-99b7-39cb2bd58c7f"
@@ -292,18 +298,17 @@ while (true) {
         console.log(`Found project: ${projectData.projectName} - ${projectData.websiteUrl}`);
 
         // Check retry count
-        // if(projectData.retryCount > 3){
-        //   console.error(`❌ Project ${data} has exceeded maximum retry count (${projectData.retryCount})`);
-        //   await updateProjectStatusToFailed(data, new Error('Maximum retry count exceeded'));
-        //   continue;
-        // }
+        if(projectData.retryCount > 3){
+          console.error(`❌ Project ${data} has exceeded maximum retry count (${projectData.retryCount})`);
+          await updateProjectStatusToFailed(data, new Error('Maximum retry count exceeded'));
+          continue;
+        }
 
         // Update project status to scraping
         await prisma.projects.update({
           where: { id: projectData.id },
           data: { status: project_type.scraping }
         });
-
         // Create scraping status record
         const scrappedData = await prisma.scrappedStatus.create({
           data: {
@@ -320,7 +325,25 @@ while (true) {
 
         // Start scraping process
         await startScrapping(scrappedData, projectData.websiteUrl);
-
+        // update that current start
+        await prisma.scrappedStatus.updateMany({
+          where : {
+            projectId : projectData.id,
+            current : true
+          },
+          data : {
+            current : false
+          }
+        })
+        // update that current start
+        await prisma.scrappedStatus.update({
+          where : {
+            id : scrappedData.id
+          },
+          data : {
+            current : true
+          }
+        })
       } catch (error) {
         console.error(`❌ Error processing job for project ${data}:`, error);
         
@@ -336,8 +359,6 @@ while (true) {
   } catch (error) {
     console.error('❌ Error in main worker loop:', error);
   }
-
-  await new Promise(resolve => setTimeout(resolve, 4000));
 }
 
 // Fixed syntax error - removed extra comma

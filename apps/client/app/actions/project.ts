@@ -33,6 +33,22 @@ export const CreateProjectAction = async (details: projectFormSchema) => {
         return ActionReturn(false,'Project url already exists')
      }
 
+     // check if project name is already taken
+     const projectNameExists = await prisma.projects.findFirst({
+        where : {
+            projectName : {
+                equals : details?.projectName,
+                mode : 'insensitive'
+            },
+            userId : userId
+        }
+     })
+     
+
+     if(projectNameExists){
+        return ActionReturn(false,'Project name already exists, please choose a different name!')
+     }
+
      const createProject = await prisma.projects.create({
         data : {
             userId,
@@ -92,4 +108,122 @@ export const getUserProjects = async() => {
     } catch (error) {
         return ActionReturn(false,'Something went wrong, please try again later!')
     }
+}
+
+export const getSingleProject = async(projectName: string) => {
+    try {
+        const { userId } = await auth()
+
+        if(!userId){
+            redirect('/sign-in')
+        }
+
+        const project = await prisma.projects.findFirst({
+          where : {
+            projectName : {
+                equals : projectName,
+                mode : 'insensitive'
+            },
+            userId : userId
+          }
+        })
+
+        if(!project){
+          return ActionReturn(false,'Project not found!')
+        }
+
+        return ActionReturn(true,'Project fetched successfully!', project)
+
+    } catch (error) {
+        return ActionReturn(false,'Something went wrong, please try again later!')
+    }
+}
+
+export const handleScrapingAgain = async(projectId: string) => {
+    try {
+        const { userId } = await auth()
+
+        if(!userId){
+            redirect('/sign-in')
+        }
+
+        let validate = await prisma.projects.findFirst({
+            where : {
+                id : projectId,
+                userId : userId,
+            }
+        })
+
+        if(!validate){
+            return ActionReturn(false,'Project not found!')
+        }
+
+        await redis.lpush(system_config.scrape_queue, validate.id)
+
+        return ActionReturn(true,'Project added to queue!',true)
+        
+    } catch (error) {
+        return ActionReturn(false,'Something went wrong, please try again later!')
+    }
+}
+
+export const UpdateProjectAction = async(projectId:string,projectData:projectFormSchema) => {
+    try {
+        const { userId } = await auth()
+
+        const parseData = projectFormZodSchema.parse(projectData)
+        console.log({parseData})
+
+        if(!userId){
+            redirect('/sign-in')
+        }
+
+        const project = await prisma.projects.update({
+            where : {
+                id : projectId,
+                userId : userId
+            },
+            data : projectData
+        })
+
+        if(!project){
+            return ActionReturn(false,'Project not found!')
+        }
+
+        return ActionReturn(true,'Project updated successfully!',project)
+
+    } catch (error) {
+        return ActionReturn(false,'Something went wrong, please try again later!')
+    }
+}
+
+export const getProjectLogs = async(projectId:string) => {
+try {
+  const {userId} = await auth()
+
+  if(!userId){
+    redirect('/sign-in')
+  }
+
+  const project = await prisma.scrappedStatus.findMany({
+    where : {
+      projectId : projectId,
+    },
+    include : {
+      scrappedLinks : true,
+    },
+    orderBy : { 
+      createdAt : 'desc'
+    }
+  })
+
+  if(!project){
+    return ActionReturn(false,'Project not found!')
+  }
+
+  return ActionReturn(true,'Project logs fetched successfully!',project)
+
+} catch (error) {
+  return ActionReturn(false,'Something went wrong, please try again later!',error)
+}
 }

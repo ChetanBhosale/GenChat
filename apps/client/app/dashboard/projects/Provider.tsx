@@ -1,6 +1,6 @@
 'use client'
 
-import { CreateProjectAction, getUserProjects } from '@/app/actions/project'
+import { CreateProjectAction, getUserProjects, UpdateProjectAction } from '@/app/actions/project'
 import { IReturn } from '@/common/action.return'
 import { ProjectContext } from '@/context/ProjectContext'
 import { projectFormSchema } from '@repo/common/type'
@@ -127,6 +127,77 @@ setLoading(false)
 return;
 }
 
+async function updateProject(projectId:string,projectData:projectFormSchema){
+  setLoading(true)
+  let hasError = false
+
+  if(projectData.projectName.trim().length < 3){
+    newErrors.projectName = 'Project name must be at least 3 characters long'
+    hasError = true
+  }
+
+  if(projectData.chatbotName.trim().length < 3){
+    newErrors.chatbotName = 'Chatbot name must be at least 3 characters long'
+    hasError = true
+  }
+  
+  
+  if(!projectData.websiteUrl.startsWith('http')){ 
+    newErrors.websiteUrl = 'Enter a valid URL (must start with http or https)'
+    hasError = true
+  }
+
+  if(projectData.projectDescription.trim().length < 10){
+    newErrors.projectDescription = 'Description must be at least 10 characters' 
+    hasError = true
+  }
+
+  if(projectData.chatBotType.trim().length === 0){
+    newErrors.chatBotType = 'Please select a chatbot type'
+    hasError = true
+  }
+
+  if(projectData.supportEmail && !validateEmail(projectData.supportEmail)){
+    newErrors.supportEmail = 'Enter a valid email address'
+    hasError = true
+  }
+
+  setError(newErrors)
+
+  if(hasError){
+    toast.warning('Please provide valid data')
+    setLoading(false)
+    return {
+      success : false,
+      message : 'Please provide valid data',
+      data : null as any
+    }
+  }
+
+  console.log("Form is valid, calling API...", projectData)
+
+ 
+  const data : IReturn = await UpdateProjectAction(projectId,projectData)
+
+  if(!data?.success){
+    toast.warning(data.message) 
+    setLoading(false)
+    return {
+      success : false,
+      message : data.message,
+      data : null as any
+    }
+  }else{
+    toast.success(data.message)
+    // router.push('/dashboard/projects')
+    setLoading(false)
+    return {
+      success : true,
+      message : data.message,
+      data : data.data as IprojectSchema
+    }
+  }
+}
 async function fetchProjectFunction(){
   setLoading(true)
   const data = await getUserProjects();
@@ -150,7 +221,8 @@ async function fetchProjectFunction(){
     loading,
     projectError,
     fetchProjectFunction,
-    filterProjects
+    filterProjects,
+    updateProject
   }
 
   return (

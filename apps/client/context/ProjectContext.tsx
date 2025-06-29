@@ -1,3 +1,4 @@
+import { IReturn } from '@/common/action.return'
 import { IprojectSchema, projectFormSchema } from '@repo/common/type'
 import { Dispatch, SetStateAction, createContext } from 'react'
 
@@ -20,7 +21,8 @@ type ProjectContextType = {
   loading : boolean,
   projectError : string,
   fetchProjectFunction : () => {},
-  filterProjects : IprojectSchema[] | [] | null
+  filterProjects : IprojectSchema[] | [] | null,
+  updateProject : (projectId:string,projectData:projectFormSchema) => Promise<IReturn>
 }
 
 // 👇 Create context with correct type

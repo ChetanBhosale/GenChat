@@ -3,6 +3,7 @@ import {Mulish} from "next/font/google";
 import "./globals.css";
 import { ClerkProvider } from "@clerk/nextjs";
 import { Toaster } from "sonner";
+import Script from "next/script";
 
 // const inter = Inter({
 //   variable: "--font-inter",
