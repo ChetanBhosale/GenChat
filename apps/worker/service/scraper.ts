@@ -1,25 +1,25 @@
 import type { IprojectSchema, IScrapingSchema } from "@repo/common/type";
 import { prisma } from "@repo/db";
+import { randomUUIDv7 } from "bun";
 import * as cheerio from "cheerio";
+import puppeteer from "puppeteer"; // Added for JavaScript-rendered content
 
-// Interface for structured content
+// Interfaces remain unchanged
 export interface StructuredContent {
   headings: string[];
   content: string[];
   codeSnippets: string[];
 }
 
-// Interface for chunked content with metadata
 export interface VectorChunk {
   url: string;
   pageTitle: string;
   timestamp: string;
   chunkType: 'heading_content_code' | 'heading_content' | 'content' | 'code';
-  content: string; // Format: heading\ncontent\ncode or subset
-  wordCount: number;
+  content: string;
+  _id: string;
 }
 
-// Interface for scraped page data
 export interface ScrapedPage {
   url: string;
   title: string;
@@ -29,7 +29,6 @@ export interface ScrapedPage {
   wordCount: number;
 }
 
-// Interface for scraper results
 export interface ScrapeResult {
   baseUrl: string;
   pages: ScrapedPage[];
@@ -37,32 +36,38 @@ export interface ScrapeResult {
   errors: string[];
 }
 
-// Configuration for the scraper
 export interface ScraperConfig {
   maxPages?: number;
   maxDepth?: number;
-  delay?: number; // delay between requests in ms
-  timeout?: number; // request timeout in ms
+  delay?: number;
+  timeout?: number;
   userAgent?: string;
   excludePatterns?: RegExp[];
   includePatterns?: RegExp[];
   minContentLength?: number;
+  useHeadlessBrowser?: boolean; // New: Option to use Puppeteer for dynamic content
+  maxRetries?: number; // New: Retry failed requests
+  keywords?: string[]; // New: Filter content by keywords
+  concurrency?: number; // New: Control parallel processing
 }
 
 const DEFAULT_CONFIG: Required<ScraperConfig> = {
   maxPages: 50,
-  maxDepth: 3,
+  maxDepth: 8,
   delay: 1000,
   timeout: 10000,
   userAgent: 'Mozilla/5.0 (compatible; AdvancedWebScraper/2.0)',
   excludePatterns: [
     /\.(pdf|jpg|jpeg|png|gif|svg|css|js|ico|woff|woff2|ttf|eot)$/i,
     /#/,
-    /\/(search|login|register|cart|checkout|account|signup)\//i,
-    /\/(privacy|terms|cookie)/i
+    /\/(login|register|cart|checkout|account|signup)\//i, // Relaxed: Removed privacy/terms
   ],
   includePatterns: [],
-  minContentLength: 20
+  minContentLength: 8, // Reduced to capture shorter meaningful content
+  useHeadlessBrowser: false, // Default to fetch for performance
+  maxRetries: 3, // Retry failed requests
+  keywords: [], // Optional keywords for content relevance
+  concurrency: 3, // Process 3 pages concurrently
 };
 
 /**
@@ -85,7 +90,7 @@ function normalizeUrl(baseUrl: string, href: string): string | null {
 }
 
 /**
- * Check if URL should be excluded based on patterns
+ * Check if URL should be excluded
  */
 function shouldExcludeUrl(url: string, config: Required<ScraperConfig>): boolean {
   for (const pattern of config.excludePatterns) {
@@ -102,133 +107,363 @@ function shouldExcludeUrl(url: string, config: Required<ScraperConfig>): boolean
 }
 
 /**
- * Fetch HTML content from URL
+ * Check if content is relevant based on keywords and boilerplate detection
  */
-async function fetchHtml(url: string, config: Required<ScraperConfig>): Promise<string> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), config.timeout);
+function isRelevantContent(text: string, config: Required<ScraperConfig>): boolean {
+  if (text.length < config.minContentLength) return false;
   
-  try {
-    const response = await fetch(url, {
-      headers: {
-        'User-Agent': config.userAgent,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-      },
-      signal: controller.signal
-    });
-    
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    }
-    
-    const contentType = response.headers.get('content-type');
-    if (!contentType || !contentType.includes('text/html')) {
-      throw new Error('Not an HTML page');
-    }
-    
-    return await response.text();
-  } finally {
-    clearTimeout(timeoutId);
+  // More comprehensive boilerplate patterns
+  const boilerplatePatterns = [
+    /^(click here|read more|learn more|see more|view all|show all)$/i,
+    /^(home|about|contact|privacy|terms|login|register|sign up|sign in)$/i,
+    /^(menu|navigation|nav|search|submit|cancel|close|ok|yes|no)$/i,
+    /^(loading|error|success|warning|info|notice)$/i,
+    /^(copyright|all rights reserved|\(c\)).*$/i,
+    /^(lorem ipsum|placeholder|sample text).*$/i,
+    /^[\d\s\-\.\(\)\+]+$/, // Only numbers, spaces, and punctuation
+    /^[^a-zA-Z]*$/, // No letters
+  ];
+  
+  if (boilerplatePatterns.some(pattern => pattern.test(text.trim()))) {
+    return false;
   }
+  
+  // Check for minimum word count
+  const wordCount = text.split(/\s+/).filter(word => word.length > 0).length;
+  if (wordCount < 3) return false;
+  
+  // Check for keyword relevance if provided
+  if (config.keywords.length > 0) {
+    return config.keywords.some(keyword => 
+      text.toLowerCase().includes(keyword.toLowerCase())
+    );
+  }
+  
+  return true;
 }
 
 /**
- * Extract structured content from HTML
+ * Fetch HTML content with retry logic
+ */
+async function fetchHtml(url: string, config: Required<ScraperConfig>): Promise<string> {
+  for (let attempt = 1; attempt <= config.maxRetries; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), config.timeout);
+    
+    try {
+      if (config.useHeadlessBrowser) {
+        const browser = await puppeteer.launch({ headless: true });
+        const page = await browser.newPage();
+        await page.setUserAgent(config.userAgent);
+        await page.goto(url, { waitUntil: 'networkidle2', timeout: config.timeout });
+        const html = await page.content();
+        await browser.close();
+        return html;
+      } else {
+        const response = await fetch(url, {
+          headers: {
+            'User-Agent': config.userAgent,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+          },
+          signal: controller.signal
+        });
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        
+        const contentType = response.headers.get('content-type');
+        if (!contentType || !contentType.includes('text/html')) {
+          throw new Error('Not an HTML page');
+        }
+        
+        return await response.text();
+      }
+    } catch (error) {
+      if (attempt === config.maxRetries) {
+        throw error;
+      }
+      console.warn(`Retry ${attempt}/${config.maxRetries} for ${url}: ${error}`);
+      await new Promise(resolve => setTimeout(resolve, config.delay * attempt));
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+  throw new Error(`Failed to fetch ${url} after ${config.maxRetries} attempts`);
+}
+
+/**
+ * Extract structured content from HTML with comprehensive content capture
  */
 function extractTextContent(html: string, config: Required<ScraperConfig>): { title: string; structuredContent: StructuredContent; wordCount: number } {
   const $ = cheerio.load(html);
   
-  // Remove unwanted elements
-  $('script, style, noscript, iframe, object, embed, meta, link').remove();
+  // Only remove truly unwanted elements - be less aggressive
+  $('script, style, noscript').remove();
   $.root().contents().filter((_, node) => node.type === 'comment').remove();
   
-  // Remove common boilerplate
-  $('nav, .nav, #nav, .navigation, .navbar, header, .header, #header, footer, .footer, #footer').remove();
-  $('.sidebar, #sidebar, .side-bar, .advertisement, .ad, .ads, .social-media, .share-buttons').remove();
-  $('.breadcrumb, .breadcrumbs, .pagination, .pager, .related-posts, .related-articles').remove();
+  // Extract title with multiple fallbacks
+  const title = $('title').text().trim() || 
+                $('meta[property="og:title"]').attr('content')?.trim() || 
+                $('meta[name="title"]').attr('content')?.trim() ||
+                $('h1').first().text().trim() || 
+                'Untitled';
   
-  // Extract title
-  // Pragmatic Play Demo
-  const title = $('title').text().trim() || $('h1').first().text().trim() || 'Untitled';
-  
-  // Extract headings (h1-h6)
   const headings: string[] = [];
+  const content: string[] = [];
+  const codeSnippets: string[] = [];
+  
+  // Strategy 1: Extract all headings first
   $('h1, h2, h3, h4, h5, h6').each((_, element) => {
-    const text = $(element).text().  trim();
-    if (text && text.length >= config.minContentLength) {
-      headings.push(text.replace(/\s+/g, ' '));
+    const headingText = $(element).text().trim();
+    if (headingText && headingText.length >= config.minContentLength) {
+      headings.push(headingText.replace(/\s+/g, ' '));
     }
   });
   
-  // Extract content from main content areas, excluding code snippets
-  const content: string[] = [];
-  const contentSelectors = [
-    'main p',
-    'article p',
-    '.content p',
-    '.post p',
-    '#main p',
-    '#content p',
-    '.main-content p'
+  // Strategy 2: Extract all code blocks
+  $('pre, code, .code, .highlight, .language-, [class*="language"], [class*="code"]').each((_, element) => {
+    const codeText = $(element).text().trim();
+    if (codeText && codeText.length >= config.minContentLength && !codeSnippets.includes(codeText)) {
+      codeSnippets.push(codeText);
+    }
+  });
+  
+  // Strategy 3: Comprehensive content extraction with multiple approaches
+  
+  // Approach 3A: Try main content containers first
+  const mainContentSelectors = [
+    'main',
+    'article', 
+    '.content',
+    '.post',
+    '.entry',
+    '.article',
+    '#main',
+    '#content',
+    '.main-content',
+    '.post-content',
+    '.entry-content',
+    '.article-content',
+    '.page-content',
+    '.single-content',
+    '.blog-content',
+    '[role="main"]',
+    '.container .row .col', // Bootstrap layouts
+    '.documentation', // Documentation sites
+    '.docs', // Docs sites
+    '.wiki', // Wiki content
+    '.readme', // README content
   ];
   
-  for (const selector of contentSelectors) {
-    $(selector).each((_, element) => {
-      // Remove inline code elements
-      $(element).find('code').remove();
-      const text = $(element).text().trim();
-      if (text && text.length >= config.minContentLength && !content.includes(text)) {
-        content.push(text.replace(/\s+/g, ' '));
-      }
-    });
-    if (content.length > 0) break;
-  }
+  let foundMainContent = false;
   
-  // Fallback to body if no content found
-  if (content.length === 0) {
-    $('body p').each((_, element) => {
-      $(element).find('code').remove();
-      const text = $(element).text().trim();
-      if (text && text.length >= config.minContentLength && !content.includes(text)) {
-        content.push(text.replace(/\s+/g, ' '));
+  for (const selector of mainContentSelectors) {
+    const container = $(selector).first();
+    if (container.length > 0) {
+      container.find('p, div, section, article, li, td, span, .text, .description').each((_, element) => {
+        // Skip if it's mainly code (already extracted)
+        if ($(element).find('pre, code').length > 0 && $(element).text().trim().length < 100) {
+          return;
+        }
+        
+        const text = $(element).text().trim();
+        if (text && 
+            text.length >= config.minContentLength && 
+            !content.includes(text) &&
+            !headings.includes(text) &&
+            isRelevantContent(text, config)) {
+          content.push(text.replace(/\s+/g, ' '));
+        }
+      });
+      
+      if (content.length > 0) {
+        foundMainContent = true;
+        break;
       }
-    });
-  }
-  
-  // Extract code snippets
-  const codeSnippets: string[] = [];
-  $('pre, code').each((_, element) => {
-    // Only include code from pre or standalone code tags, not inline code within p
-    if ($(element).parent().is('p')) return;
-    const text = $(element).text().trim();
-    if (text && text.length >= config.minContentLength && !codeSnippets.includes(text)) {
-      codeSnippets.push(text.replace(/\s+/g, ' '));
     }
+  }
+  
+  // Approach 3B: If no main content found, extract from common content elements
+  if (!foundMainContent) {
+    $('p, div, section, article, li, td, blockquote, .text, .description, .summary').each((_, element) => {
+      const $el = $(element);
+      
+      // Skip navigation, header, footer, sidebar elements
+      if ($el.closest('nav, header, footer, .nav, .navigation, .sidebar, .menu, .breadcrumb').length > 0) {
+        return;
+      }
+      
+      // Skip if it's mainly code (already extracted)
+      if ($el.find('pre, code').length > 0 && $el.text().trim().length < 100) {
+        return;
+      }
+      
+      const text = $el.text().trim();
+      if (text && 
+          text.length >= config.minContentLength && 
+          !content.includes(text) &&
+          !headings.includes(text) &&
+          isRelevantContent(text, config)) {
+        content.push(text.replace(/\s+/g, ' '));
+      }
+    });
+  }
+  
+  // Approach 3C: Extract from specific content types if still low content
+  if (content.length < 5) {
+    // Try to extract from lists, tables, and other structured content
+    $('ul li, ol li, dl dd, table td, table th').each((_, element) => {
+      const text = $(element).text().trim();
+      if (text && 
+          text.length >= config.minContentLength && 
+          !content.includes(text) &&
+          !headings.includes(text)) {
+        content.push(text.replace(/\s+/g, ' '));
+      }
+    });
+    
+    // Try to extract from divs with meaningful classes
+    $('div[class*="content"], div[class*="text"], div[class*="description"], div[class*="body"], div[class*="post"], div[class*="article"]').each((_, element) => {
+      const text = $(element).text().trim();
+      if (text && 
+          text.length >= config.minContentLength && 
+          !content.includes(text) &&
+          !headings.includes(text)) {
+        content.push(text.replace(/\s+/g, ' '));
+      }
+    });
+  }
+  
+  // Approach 3D: Last resort - extract any meaningful text
+  if (content.length < 3) {
+    $('body *').each((_, element) => {
+      const $el = $(element);
+      
+      // Skip elements that typically don't have meaningful content
+      if ($el.is('script, style, noscript, meta, link, head, title, nav, header, footer')) {
+        return;
+      }
+      
+      // Skip if it has children (we want leaf nodes)
+      if ($el.children().length > 0) {
+        return;
+      }
+      
+      const text = $el.text().trim();
+      if (text && 
+          text.length >= config.minContentLength && 
+          text.length <= 1000 && // Avoid extremely long text blocks
+          !content.includes(text) &&
+          !headings.includes(text) &&
+          isRelevantContent(text, config)) {
+        content.push(text.replace(/\s+/g, ' '));
+      }
+    });
+  }
+  
+  // Remove duplicates and very similar content
+  const uniqueContent = content.filter((item, index) => {
+    // Check if this content is substantially different from previous items
+    for (let i = 0; i < index; i++) {
+      if(item && content[i]){
+        const similarity = calculateSimilarity(item, content[i] || '');
+        if(similarity > 0.8){
+          return false;
+        }
+      }
+    }
+    return true;
   });
   
   // Calculate total word count
-  const allText = [...headings, ...content, ...codeSnippets].join(' ');
+  const allText = [...headings, ...uniqueContent, ...codeSnippets].join(' ');
   const wordCount = allText.split(/\s+/).filter(word => word.length > 0).length;
+  
+  console.log(`Extracted from ${title}: ${headings.length} headings, ${uniqueContent.length} content blocks, ${codeSnippets.length} code snippets, ${wordCount} total words`);
   
   return {
     title,
-    structuredContent: { headings, content, codeSnippets },
+    structuredContent: { 
+      headings, 
+      content: uniqueContent, 
+      codeSnippets 
+    },
     wordCount
   };
 }
 
 /**
- * Find all internal links on a page
+ * Calculate similarity between two strings (simple implementation)
+ */
+function calculateSimilarity(str1: string, str2: string): number {
+  const words1 = str1.toLowerCase().split(/\s+/);
+  const words2 = str2.toLowerCase().split(/\s+/);
+  
+  const set1 = new Set(words1);
+  const set2 = new Set(words2);
+  
+  const intersection = new Set([...set1].filter(word => set2.has(word)));
+  const union = new Set([...set1, ...set2]);
+  
+  return intersection.size / union.size;
+}
+
+/**
+ * More aggressive link finding to discover more pages
  */
 function findInternalLinks(html: string, baseUrl: string): string[] {
   const $ = cheerio.load(html);
   const links = new Set<string>();
   
+  // Standard href links
   $('a[href]').each((_, element) => {
     const href = $(element).attr('href');
+    if (href) {
+      const normalizedUrl = normalizeUrl(baseUrl, href);
+      if (normalizedUrl && normalizedUrl !== baseUrl && !links.has(normalizedUrl)) {
+        links.add(normalizedUrl);
+      }
+    }
+  });
+  
+  // Links in onclick, data attributes, and other places
+  $('[onclick], [data-url], [data-href], [data-link]').each((_, element) => {
+    const onclick = $(element).attr('onclick');
+    const dataUrl = $(element).attr('data-url') || 
+                   $(element).attr('data-href') || 
+                   $(element).attr('data-link');
+    
+    if (dataUrl) {
+      const normalizedUrl = normalizeUrl(baseUrl, dataUrl);
+      if (normalizedUrl && normalizedUrl !== baseUrl && !links.has(normalizedUrl)) {
+        links.add(normalizedUrl);
+      }
+    }
+    
+    if (onclick) {
+      // Extract URLs from onclick handlers
+      const urlMatches = onclick.match(/(?:location\.href|window\.open|navigate|goto)\s*=?\s*['"]([^'"]+)['"]/g);
+      if (urlMatches) {
+        urlMatches.forEach(match => {
+          const urlMatch = match.match(/['"]([^'"]+)['"]/);
+          if (urlMatch && urlMatch[1]) {
+            const normalizedUrl = normalizeUrl(baseUrl, urlMatch[1]);
+            if (normalizedUrl && normalizedUrl !== baseUrl && !links.has(normalizedUrl)) {
+              links.add(normalizedUrl);
+            }
+          }
+        });
+      }
+    }
+  });
+  
+  // Links in meta tags (like canonical, alternate)
+  $('link[href], meta[content*="http"]').each((_, element) => {
+    const href = $(element).attr('href') || $(element).attr('content');
     if (href) {
       const normalizedUrl = normalizeUrl(baseUrl, href);
       if (normalizedUrl && normalizedUrl !== baseUrl && !links.has(normalizedUrl)) {
@@ -246,7 +481,7 @@ function findInternalLinks(html: string, baseUrl: string): string[] {
 async function scrapePage(url: string, config: Required<ScraperConfig>): Promise<ScrapedPage> {
   const html = await fetchHtml(url, config);
   const { title, structuredContent, wordCount } = extractTextContent(html, config);
-  const links = findInternalLinks(html, url);
+  const links = findInternalLinks(html, url); // Now synchronous
   
   return {
     url,
@@ -259,7 +494,7 @@ async function scrapePage(url: string, config: Required<ScraperConfig>): Promise
 }
 
 /**
- * Main scraper function
+ * Main scraper function with parallel processing
  */
 export async function scrapeWebsite(
   project: IScrapingSchema, 
@@ -274,9 +509,8 @@ export async function scrapeWebsite(
   const baseUrl = new URL(startUrl).origin;
   
   console.log(`Starting to scrape: ${startUrl}`);
-  console.log(`Max pages: ${config.maxPages}, Max depth: ${config.maxDepth}`);
+  console.log(`Max pages: ${config.maxPages}, Max depth: ${config.maxDepth}, Concurrency: ${config.concurrency}`);
   
-  // Update status to indicate scraping is in progress
   await prisma.scrappedStatus.update({
     where: { id: project.id },
     data: { success: 'working' }
@@ -285,14 +519,15 @@ export async function scrapeWebsite(
   let depth = 0;
   
   while (toVisit.size > 0 && pages.length < config.maxPages && depth < config.maxDepth) {
-    const currentBatch = Array.from(toVisit);
+    const currentBatch = Array.from(toVisit).slice(0, config.concurrency);
     toVisit.clear();
     
     console.log(`Depth ${depth + 1}: Processing ${currentBatch.length} URLs`);
     
-    for (const url of currentBatch) {
+    // Process pages in parallel
+    const pagePromises = currentBatch.map(async url => {
       if (visited.has(url) || pages.length >= config.maxPages) {
-        continue;
+        return null;
       }
       
       visited.add(url);
@@ -300,9 +535,7 @@ export async function scrapeWebsite(
       
       try {
         console.log(`Scraping: ${url}`);
-        
         const pageData = await scrapePage(url, config);
-        pages.push(pageData);
         isSuccess = true;
         
         // Add new links to queue
@@ -313,29 +546,38 @@ export async function scrapeWebsite(
         }
         
         console.log(`✓ Scraped: ${pageData.title} (${pageData.wordCount} words)`);
-        
-        if (config.delay > 0) {
-          await new Promise(resolve => setTimeout(resolve, config.delay));
-        }
-        
+        return pageData;
       } catch (error) {
         const errorMsg = `Failed to scrape ${url}: ${error instanceof Error ? error.message : String(error)}`;
         console.error(`✗ ${errorMsg}`);
         errors.push(errorMsg);
+        return null;
       }
-      
-      // Save each URL to database immediately
+    });
+    
+    // Wait for batch to complete
+    const batchResults = (await Promise.all(pagePromises)).filter((page): page is ScrapedPage => page !== null);
+    pages.push(...batchResults);
+    
+    // Save batch to database
+    for (const page of batchResults) {
       try {
         await prisma.scrappedLinks.create({
           data: {
-            urls: url,
-            status: isSuccess,
+            urls: page.url,
+            status: true,
             scrappedId: project.id
           }
         });
       } catch (dbError) {
-        console.error(`Failed to save link to database: ${url}`, dbError);
+        console.error(`Failed to save link to database: ${page.url}`, dbError);
+        errors.push(`Database error for ${page.url}: ${dbError}`);
       }
+    }
+    
+    // Delay between batches
+    if (config.delay > 0) {
+      await new Promise(resolve => setTimeout(resolve, config.delay));
     }
     
     depth++;
@@ -344,7 +586,6 @@ export async function scrapeWebsite(
   const total_words = pages.reduce((sum, page) => sum + page.wordCount, 0);
   const finalStatus = errors.length === 0 ? 'success' : (pages.length > 0 ? 'success' : 'failed');
   
-  // Update final scraping status
   await prisma.scrappedStatus.update({
     where: { id: project.id },
     data: {
@@ -371,54 +612,163 @@ export async function scrapeWebsite(
 }
 
 /**
- * Get all unique URLs from scraping result
+ * Get all unique URLs
  */
 export function getAllUrls(result: ScrapeResult): string[] {
   return result.pages.map(page => page.url);
 }
 
 /**
- * Get chunked content for vector database storage
+ * Improved chunking strategy for better vector embeddings
  */
 export function getChunkedContent(result: ScrapeResult): VectorChunk[] {
   const chunks: VectorChunk[] = [];
+  const MIN_CHUNK_SIZE = 50; // Minimum words per chunk
+  const MAX_CHUNK_SIZE = 500; // Maximum words per chunk
+  let chunkId = 0;
   
   for (const page of result.pages) {
     const { headings, content, codeSnippets } = page.structuredContent;
-    const totalItems = Math.max(headings.length, content.length, codeSnippets.length);
     
-    for (let i = 0; i < totalItems; i++) {
-      const heading = headings[i] || '';
-      const contentItem = content[i] || '';
-      const codeItem = codeSnippets[i] || '';
+    // Strategy 1: Pair headings with their content
+    for (let i = 0; i < headings.length; i++) {
+      const heading = headings[i];
+      const relatedContent = content[i] || '';
+      const relatedCode = codeSnippets[i] || '';
       
-      const chunkItems = heading || contentItem || codeItem ? [heading, contentItem, codeItem].filter(item => item) : [];
-      if (chunkItems.length === 0) continue;
-      
-      let chunkType: VectorChunk['chunkType'];
-      if (chunkItems.length === 3) {
-        chunkType = 'heading_content_code';
-      } else if (heading && contentItem) {
-        chunkType = 'heading_content';
-      } else if (contentItem) {
-        chunkType = 'content';
-      } else {
-        chunkType = 'code';
+      // Combine heading with its content
+      let chunkContent = heading;
+      if (relatedContent) {
+        chunkContent += '\n\n' + relatedContent;
+      }
+      if (relatedCode) {
+        chunkContent += '\n\n```\n' + relatedCode + '\n```';
       }
       
-      const chunkContent = chunkItems.join('\n') + '\n';
-      const wordCount = chunkContent.split(/\s+/).filter(word => word.length > 0).length;
+      // Check if chunk meets minimum size requirement
+      const wordCount = chunkContent?.split(/\s+/).filter(word => word.length > 0).length || 0;
       
+      if (wordCount >= MIN_CHUNK_SIZE) {
+        chunks.push({
+          url: page.url,
+          pageTitle: page.title,
+          timestamp: page.timestamp.toISOString(),
+          chunkType: relatedContent && relatedCode ? 'heading_content_code' : 
+                     relatedContent ? 'heading_content' : 'heading_content',
+          content: chunkContent || '',
+          _id: `${chunkId++}-${randomUUIDv7()}`
+        });
+      }
+    }
+    
+    // Strategy 2: Group remaining content into meaningful chunks
+    const remainingContent = content.slice(headings.length);
+    let currentChunk = '';
+    let currentWordCount = 0;
+    
+    for (const contentItem of remainingContent) {
+      const itemWordCount = contentItem.split(/\s+/).filter(word => word.length > 0).length;
+      
+      // If adding this content would exceed max chunk size, finalize current chunk
+      if (currentWordCount + itemWordCount > MAX_CHUNK_SIZE && currentChunk) {
+        if (currentWordCount >= MIN_CHUNK_SIZE) {
+          chunks.push({
+            url: page.url,
+            pageTitle: page.title,
+            timestamp: page.timestamp.toISOString(),
+            chunkType: 'content',
+            content: currentChunk.trim(),
+            _id: `${chunkId++}-${randomUUIDv7()}`
+          });
+        }
+        currentChunk = '';
+        currentWordCount = 0;
+      }
+      
+      // Add content to current chunk
+      if (currentChunk) {
+        currentChunk += '\n\n' + contentItem;
+      } else {
+        currentChunk = contentItem;
+      }
+      currentWordCount += itemWordCount;
+    }
+    
+    // Finalize last content chunk
+    if (currentChunk && currentWordCount >= MIN_CHUNK_SIZE) {
       chunks.push({
         url: page.url,
         pageTitle: page.title,
         timestamp: page.timestamp.toISOString(),
-        chunkType,
-        content: chunkContent,
-        wordCount
+        chunkType: 'content',
+        content: currentChunk.trim(),
+        _id: `${chunkId++}-${randomUUIDv7()}`
       });
     }
+    
+    // Strategy 3: Group code snippets together if they're substantial
+    const substantialCodeSnippets = codeSnippets.slice(headings.length).filter(code => 
+      code.split(/\s+/).filter(word => word.length > 0).length >= MIN_CHUNK_SIZE / 2
+    );
+    
+    let currentCodeChunk = '';
+    let currentCodeWordCount = 0;
+    
+    for (const codeSnippet of substantialCodeSnippets) {
+      const codeWordCount = codeSnippet.split(/\s+/).filter(word => word.length > 0).length;
+      
+      if (currentCodeWordCount + codeWordCount > MAX_CHUNK_SIZE && currentCodeChunk) {
+        chunks.push({
+          url: page.url,
+          pageTitle: page.title,
+          timestamp: page.timestamp.toISOString(),
+          chunkType: 'code',
+          content: '```\n' + currentCodeChunk.trim() + '\n```',
+          _id: `${chunkId++}-${randomUUIDv7()}`
+        });
+        currentCodeChunk = '';
+        currentCodeWordCount = 0;
+      }
+      
+      if (currentCodeChunk) {
+        currentCodeChunk += '\n\n' + codeSnippet;
+      } else {
+        currentCodeChunk = codeSnippet;
+      }
+      currentCodeWordCount += codeWordCount;
+    }
+    
+    // Finalize last code chunk
+    if (currentCodeChunk && currentCodeWordCount >= MIN_CHUNK_SIZE / 2) {
+      chunks.push({
+        url: page.url,
+        pageTitle: page.title,
+        timestamp: page.timestamp.toISOString(),
+        chunkType: 'code',
+        content: '```\n' + currentCodeChunk.trim() + '\n```',
+        _id: `${chunkId++}-${randomUUIDv7()}`
+      });
+    }
+    
+    // Strategy 4: If no substantial chunks were created, create one comprehensive chunk
+    if (chunks.filter(chunk => chunk.url === page.url).length === 0) {
+      const allContent = [...headings, ...content].filter(text => text.length > 10).join('\n\n');
+      if (allContent) {
+        chunks.push({
+          url: page.url,
+          pageTitle: page.title,
+          timestamp: page.timestamp.toISOString(),
+          chunkType: 'content',
+          content: allContent,
+          _id: `${chunkId++}-${randomUUIDv7()}`
+        });
+      }
+    }
   }
+  
+  console.log(`Created ${chunks.length} meaningful chunks from ${result.pages.length} pages`);
+  console.log(`Average chunk size: ${chunks.reduce((sum, chunk) => 
+    sum + chunk.content.split(/\s+/).filter(word => word.length > 0).length, 0) / chunks.length} words`);
   
   return chunks;
 }

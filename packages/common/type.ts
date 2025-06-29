@@ -88,3 +88,5 @@ export const scrapingSchemaZod = z.object({
 })
 
 export type IScrapingSchema = z.infer<typeof scrapingSchemaZod>
+
+

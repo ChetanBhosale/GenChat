@@ -57,3 +57,18 @@ export const system_config = {
   scrape_queue : 'scrape_queue',
   scrape_queue_length : 'scrape_queue_length'
 }
+
+export const ai_config = {
+  dev_index :'devindex',
+  prod_index :'prodindex',
+  region : 'us-east-1',
+  cloud : 'aws',
+  model : 'llama-text-embed-v2'
+}
+
+export const chunk_type = {
+  heading_content_code : 'heading_content_code',
+  heading_content : 'heading_content',
+  content : 'content',
+  code : 'code'
+}

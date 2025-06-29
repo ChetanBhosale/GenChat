@@ -15,10 +15,11 @@
     "typescript": "^5"
   },
   "dependencies": {
+    "@repo/ai": "workspace:*",
     "@repo/common": "workspace:*",
     "@repo/db": "workspace:*",
     "@repo/redis": "workspace:*",
     "cheerio": "^1.1.0",
-    "@repo/ai": "workspace:*"
+    "puppeteer": "^24.11.1"
   }
 }
